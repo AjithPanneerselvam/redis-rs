@@ -1,3 +1,4 @@
+use std::net::TcpStream;
 use std::time::Duration;
 
 #[cfg(feature = "aio")]
@@ -266,6 +267,10 @@ impl ConnectionLike for Client {
     ) -> RedisResult<Vec<Value>> {
         self.get_connection()?
             .req_packed_commands(cmd, offset, count)
+    }
+
+    fn req_packed_command_raw_resp(&mut self, cmd: &[u8]) -> RedisResult<TcpStream> {
+        self.get_connection()?.req_packed_command_raw_resp(cmd)
     }
 
     fn get_db(&self) -> i64 {

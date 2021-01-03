@@ -8,7 +8,8 @@ use std::time::Duration;
 use crate::cmd::{cmd, pipe, Pipeline};
 use crate::parser::Parser;
 use crate::types::{
-    from_redis_value, ErrorKind, FromRedisValue, RedisError, RedisResult, ToRedisArgs, Value,
+    from_redis_value, make_extension_error, ErrorKind, FromRedisValue, RedisError, RedisResult,
+    ToRedisArgs, Value,
 };
 
 #[cfg(unix)]
@@ -605,6 +606,8 @@ pub trait ConnectionLike {
     /// reads the single response from it.
     fn req_packed_command(&mut self, cmd: &[u8]) -> RedisResult<Value>;
 
+    fn req_packed_command_raw_resp(&mut self, cmd: &[u8]) -> RedisResult<TcpStream>;
+
     /// Sends multiple already encoded (packed) command into the TCP socket
     /// and reads `count` responses from it.  This is used to implement
     /// pipelining.
@@ -793,6 +796,54 @@ impl Connection {
         }
         result
     }
+
+    /// Fetches a single response from the connection.
+    fn read_raw_response(&mut self) -> RedisResult<&mut TcpStream> {
+        let result = match self.con {
+            ActualConnection::Tcp(TcpConnection { ref mut reader, .. }) => {
+                //self.parser.parse_value(reader)
+                Ok(reader)
+            }
+            #[cfg(feature = "tls")]
+            ActualConnection::TcpTls(TcpTlsConnection { ref mut reader, .. }) => {
+                //self.parser.parse_value(reader)
+                Ok(reader)
+            }
+            #[cfg(unix)]
+            ActualConnection::Unix(UnixConnection { ref mut sock, .. }) => Err(fail!((
+                ErrorKind::ClientError,
+                "Unix connection not supported",
+            ))),
+        };
+
+        // shutdown connection on protocol error
+        /*if let Err(e) = &result {
+            let shutdown = match e.as_io_error() {
+                Some(e) => e.kind() == io::ErrorKind::UnexpectedEof,
+                None => false,
+            };
+            if shutdown {
+                match self.con {
+                    ActualConnection::Tcp(ref mut connection) => {
+                        let _ = connection.reader.shutdown(net::Shutdown::Both);
+                        connection.open = false;
+                    }
+                    #[cfg(feature = "tls")]
+                    ActualConnection::TcpTls(ref mut connection) => {
+                        let _ = connection.reader.shutdown();
+                        connection.open = false;
+                    }
+                    #[cfg(unix)]
+                    ActualConnection::Unix(ref mut connection) => {
+                        let _ = connection.sock.shutdown(net::Shutdown::Both);
+                        connection.open = false;
+                    }
+                }
+            }
+        }*/
+
+        result
+    }
 }
 
 impl ConnectionLike for Connection {
@@ -823,6 +874,28 @@ impl ConnectionLike for Connection {
             }
         }
         Ok(rv)
+    }
+
+    fn req_packed_command_raw_resp(&mut self, cmd: &[u8]) -> RedisResult<TcpStream> {
+        if self.pubsub {
+            self.exit_pubsub()?;
+        }
+
+        self.con.send_bytes(cmd)?;
+
+        match self.read_raw_response() {
+            Err(e) => Err(e),
+            Ok(tcp_stream) => {
+                match tcp_stream.try_clone() {
+                    Err(_) => {
+                        return Err(make_extension_error("tcp stream clone error", None));
+                    }
+                    Ok(val) => {
+                        return Ok(val);
+                    }
+                };
+            }
+        }
     }
 
     fn get_db(&self) -> i64 {
